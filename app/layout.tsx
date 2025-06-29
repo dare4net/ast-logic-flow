@@ -2,9 +2,9 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'v0 App',
-  description: 'Created with v0',
-  generator: 'v0.dev',
+  title: 'AST Logic Flow',
+  description: 'A visual programming environment for building logic flows',
+  generator: 'Created by Afterschool Tech',
 }
 
 export default function RootLayout({

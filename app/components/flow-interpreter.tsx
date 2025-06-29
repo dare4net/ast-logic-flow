@@ -35,7 +35,8 @@ export class FlowInterpreter {
     try {
       this.executeNode(startNode.id)
     } catch (error) {
-      this.errors.push(`❌ Runtime error: ${error.message}`)
+      const errMsg = error instanceof Error ? error.message : String(error)
+      this.errors.push(`❌ Runtime error: ${errMsg}`)
     }
 
     return { variables: this.variables, log: this.executionLog, output: this.output, errors: this.errors }
@@ -114,78 +115,24 @@ export class FlowInterpreter {
     const variables: Record<string, any> = {}
     const errors: string[] = []
 
+    // Custom print function to capture output
+    const print = (...args: any[]) => {
+      output.push(args.map(String).join(" "))
+    }
+
+    // Redirect console.log to print
+    const originalConsoleLog = console.log
+    console.log = print
+
     try {
-      // Simulate JavaScript execution by parsing the generated code
-      const lines = code.split("\n").filter((line) => line.trim() && !line.trim().startsWith("//"))
-
-      for (const line of lines) {
-        const trimmedLine = line.trim()
-
-        // Simulate variable declarations
-        if (trimmedLine.startsWith("let ")) {
-          const match = trimmedLine.match(/let\s+(\w+)\s*=\s*(.+);/)
-          if (match) {
-            const [, varName, value] = match
-            variables[varName] = this.parseValue(value)
-            output.push(`📦 Declared ${varName} = ${variables[varName]}`)
-          }
-        }
-
-        // Simulate variable assignments
-        else if (trimmedLine.includes(" = ") && !trimmedLine.startsWith("let")) {
-          const match = trimmedLine.match(/(\w+)\s*=\s*(.+);/)
-          if (match) {
-            const [, varName, value] = match
-            variables[varName] = this.parseValue(value)
-            output.push(`📝 Set ${varName} = ${variables[varName]}`)
-          }
-        }
-
-        // Simulate console.log
-        else if (trimmedLine.includes("console.log")) {
-          const match = trimmedLine.match(/console\.log$$(.+)$$;/)
-          if (match) {
-            const content = match[1]
-            if (content.startsWith('"') && content.endsWith('"')) {
-              output.push(`📝 ${content.slice(1, -1)}`)
-            } else {
-              output.push(`📝 ${content}`)
-            }
-          }
-        }
-
-        // Simulate alert
-        else if (trimmedLine.includes("alert")) {
-          const match = trimmedLine.match(/alert$$(.+)$$;/)
-          if (match) {
-            const content = match[1]
-            output.push(`🚨 ALERT: ${content}`)
-          }
-        }
-
-        // Simulate conditions
-        else if (trimmedLine.startsWith("if (")) {
-          const match = trimmedLine.match(/if\s*$$(.+)$$\s*{/)
-          if (match) {
-            const condition = match[1]
-            const result = this.evaluateCondition(condition, variables)
-            output.push(`❓ Condition: ${condition} = ${result}`)
-          }
-        }
-
-        // Simulate loops
-        else if (trimmedLine.startsWith("while (")) {
-          const match = trimmedLine.match(/while\s*$$(.+)$$\s*{/)
-          if (match) {
-            const condition = match[1]
-            output.push(`🔁 While loop: ${condition}`)
-          }
-        }
-      }
-
-      output.push("✅ Simulation completed successfully!")
+      // eslint-disable-next-line no-new-func
+      const func = new Function("print", code)
+      func(print)
     } catch (error) {
-      errors.push(`❌ Simulation error: ${error.message}`)
+      const errMsg = error instanceof Error ? error.message : String(error)
+      errors.push(`❌ JS Runtime error: ${errMsg}`)
+    } finally {
+      console.log = originalConsoleLog
     }
 
     return { output, variables, errors }
@@ -207,87 +154,193 @@ export class FlowInterpreter {
       case "start":
         this.output.push("🚀 Program started")
         break
-
       case "end":
         this.output.push("🏁 Program ended")
         return
-
-      case "variable":
-        this.variables[node.data.variableName] = this.parseValue(node.data.variableValue)
-        this.output.push(`📦 Declared ${node.data.variableName} = ${this.variables[node.data.variableName]}`)
+      case "declareVariable": {
+        const varName = node.data.variableName
+        if (varName && varName.trim() !== "") {
+          // Use variableValue if present, fallback to initialValue for legacy
+          const value = node.data.variableValue !== undefined ? node.data.variableValue : node.data.initialValue
+          this.variables[varName] = this.parseValue(value)
+          this.output.push(`📦 Declared ${node.data.variableType} ${varName} = ${this.variables[varName]}`)
+        } else {
+          this.output.push("⚠️ Variable declaration missing name")
+        }
         break
-
-      case "setVariable":
-        this.variables[node.data.variableName] = this.parseValue(node.data.variableValue)
-        this.output.push(`📝 Set ${node.data.variableName} = ${this.variables[node.data.variableName]}`)
+      }
+      case "assignment": {
+        const varName = node.data.variableName
+        if (varName && varName.trim() !== "") {
+          this.variables[varName] = this.parseValue(node.data.value)
+          this.output.push(`📝 Set ${varName} = ${this.variables[varName]}`)
+        } else {
+          this.output.push("⚠️ Assignment missing variable name")
+        }
         break
-
-      case "getVariable":
-        const value = this.variables[node.data.variableName]
-        this.output.push(`📋 Got ${node.data.variableName} = ${value}`)
+      }
+      case "number":
+      case "string":
+      case "boolean":
+      case "array":
+      case "object":
+        // These are literal value nodes, just store in a temp variable
+        this.variables[`_literal_${node.id}`] = node.data.value
         break
-
-      case "if":
-        const condition = this.evaluateCondition(node.data.condition, this.variables)
-        this.output.push(`❓ If condition: ${node.data.condition} = ${condition}`)
-
-        if (condition) {
-          // Execute true branch
-          const trueEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "true")
-          if (trueEdge) {
-            this.executeNode(trueEdge.target, new Set(visited))
+      case "conditional": {
+        // Evaluate the condition using left, operator, right
+        const left = this.parseValue(node.data.left)
+        const right = this.parseValue(node.data.right)
+        const op = node.data.operator
+        let result = false
+        switch (op) {
+          case "==": result = left == right; break
+          case "!=": result = left != right; break
+          case ">": result = left > right; break
+          case "<": result = left < right; break
+          case ">=": result = left >= right; break
+          case "<=": result = left <= right; break
+          default: result = false
+        }
+        this.output.push(`❓ Condition: ${left} ${op} ${right} = ${result}`)
+        const branch = result ? "true" : "false"
+        const branchEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === branch)
+        if (branchEdge) this.executeNode(branchEdge.target, new Set(visited))
+        break
+      }
+      case "switchCase": {
+        const value = this.variables[node.data.variable]
+        let matched = false
+        for (const c of node.data.cases || []) {
+          if (value == c.value) {
+            this.output.push(`🔀 Switch matched: ${c.value}`)
+            const caseEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === c.value)
+            if (caseEdge) this.executeNode(caseEdge.target, new Set(visited))
+            matched = true
+            break
           }
         }
-        // Always continue to next node after if block
+        if (!matched && node.data.default) {
+          this.output.push(`🔀 Switch default case`)
+          const defaultEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "default")
+          if (defaultEdge) this.executeNode(defaultEdge.target, new Set(visited))
+        }
         break
-
-      case "while":
-        let whileCondition = this.evaluateCondition(node.data.condition, this.variables)
-        this.output.push(`🔁 While loop: ${node.data.condition}`)
+      }
+      case "forLoop": {
+        // Simple for loop: init, condition, increment
+        // Evaluate init
+        try { eval(`var ${node.data.init}`) } catch {}
         let iterations = 0
-
-        while (whileCondition && iterations < 100) {
+        while (this.evaluateCondition(node.data.condition, this.variables) && iterations < 100) {
           const loopEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "loop")
-          if (loopEdge) {
-            this.executeNode(loopEdge.target, new Set(visited))
-          }
-          whileCondition = this.evaluateCondition(node.data.condition, this.variables)
+          if (loopEdge) this.executeNode(loopEdge.target, new Set(visited))
+          try { eval(node.data.increment) } catch {}
           iterations++
         }
-
-        if (iterations >= 100) {
-          this.output.push("⚠️ Loop terminated after 100 iterations (safety limit)")
+        if (iterations >= 100) this.output.push("⚠️ For loop terminated after 100 iterations (safety limit)")
+        break
+      }
+      case "forEach": {
+        const arr = this.variables[node.data.array] || []
+        for (const item of arr) {
+          this.variables[node.data.item] = item
+          const loopEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "loop")
+          if (loopEdge) this.executeNode(loopEdge.target, new Set(visited))
         }
         break
-
-      case "action":
-        const actionResult = this.parseActionValue(node.data.actionValue)
-        if (actionResult.error) {
-          this.errors.push(`❌ ${actionResult.error}`)
-          return // Terminate flow execution
-        }
-
-        switch (node.data.actionType) {
-          case "print":
-            this.output.push(`📝 ${actionResult.result}`)
-            break
-          case "alert":
-            this.output.push(`🚨 ALERT: ${actionResult.result}`)
-            break
-          case "write":
-            this.output.push(`✍️ WRITE: ${actionResult.result}`)
-            break
-          default:
-            this.output.push(`⚡ ${node.data.actionType}: ${actionResult.result}`)
+      }
+      case "whileLoop":
+      case "doWhileLoop": {
+        let condition = this.evaluateCondition(node.data.condition, this.variables)
+        let iterations = 0
+        do {
+          const loopEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "loop")
+          if (loopEdge) this.executeNode(loopEdge.target, new Set(visited))
+          condition = this.evaluateCondition(node.data.condition, this.variables)
+          iterations++
+        } while (condition && iterations < 100)
+        if (iterations >= 100) this.output.push("⚠️ Loop terminated after 100 iterations (safety limit)")
+        break
+      }
+      case "functionDeclaration":
+        // For now, just log function declaration
+        this.output.push(`⚙️ Declared function ${node.data.functionName}`)
+        break
+      case "functionCall":
+        this.output.push(`📞 Called function ${node.data.functionName}`)
+        break
+      case "arithmeticOperator": {
+        const result = this.evaluateMath(node.data.left, node.data.operator, node.data.right)
+        this.output.push(`➗ ${node.data.left} ${node.data.operator} ${node.data.right} = ${result}`)
+        this.variables[`_arith_${node.id}`] = result
+        break
+      }
+      case "comparisonOperator": {
+        const result = this.evaluateComparison(node.data.left, node.data.operator, node.data.right)
+        this.output.push(`⚖️ ${node.data.left} ${node.data.operator} ${node.data.right} = ${result}`)
+        this.variables[`_comp_${node.id}`] = result
+        break
+      }
+      case "logicalOperator": {
+        const result = this.evaluateLogic(node.data.left, node.data.operator, node.data.right)
+        this.output.push(`🔀 ${node.data.left} ${node.data.operator} ${node.data.right} = ${result}`)
+        this.variables[`_logic_${node.id}`] = result
+        break
+      }
+      case "arrayPush": {
+        if (!Array.isArray(this.variables[node.data.array])) this.variables[node.data.array] = []
+        this.variables[node.data.array].push(this.parseValue(node.data.value))
+        this.output.push(`📥 Pushed ${node.data.value} to ${node.data.array}`)
+        break
+      }
+      case "arrayPop": {
+        if (Array.isArray(this.variables[node.data.array])) {
+          const val = this.variables[node.data.array].pop()
+          this.output.push(`📤 Popped ${val} from ${node.data.array}`)
         }
         break
-
-      case "math":
-        const mathResult = this.evaluateMath(node.data.left, node.data.operator, node.data.right)
-        this.output.push(`🧮 ${node.data.left} ${node.data.operator} ${node.data.right} = ${mathResult}`)
-        // Store result in a temporary variable
-        this.variables["_mathResult"] = mathResult
+      }
+      case "arrayMap": {
+        // Not actually executing callback, just log
+        this.output.push(`🗺️ Mapped ${node.data.array}`)
         break
+      }
+      case "arrayFilter": {
+        this.output.push(`🔍 Filtered ${node.data.array}`)
+        break
+      }
+      case "arrayReduce": {
+        this.output.push(`➖ Reduced ${node.data.array}`)
+        break
+      }
+      case "print":
+        this.output.push(`🖨️ ${this.parseValue(node.data.value)}`)
+        break
+      case "input":
+        this.variables[node.data.variableName] = "user input"
+        this.output.push(`⌨️ Input for ${node.data.variableName}`)
+        break
+      case "try":
+        this.output.push("🛡️ Try block")
+        break
+      case "catch":
+        this.output.push(`🪤 Catch block (${node.data.errorVar})`)
+        break
+      case "throw":
+        this.output.push(`🚨 Throw: ${node.data.error}`)
+        break
+      case "return":
+        this.output.push("↩️ Return")
+        return
+      case "break":
+        this.output.push("⏹️ Break")
+        return
+      case "continue":
+        this.output.push("⏭️ Continue")
+        return
+      default:
+        this.output.push(`⚡ Unknown node type: ${node.type}`)
     }
 
     // Continue to next node
@@ -297,13 +350,31 @@ export class FlowInterpreter {
     }
   }
 
+  // Enhanced parseValue to support simple arithmetic expressions (e.g., x + 1, y - 2)
   private parseValue(value: string): any {
     if (!value) return 0
     if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1)
     if (!isNaN(Number(value))) return Number(value)
     if (value === "true") return true
     if (value === "false") return false
+    // If value is a variable name
     if (this.variables[value] !== undefined) return this.variables[value]
+
+    // Try to evaluate simple arithmetic expressions (e.g., x + 1)
+    try {
+      // Replace variable names in the expression with their values
+      let expr = value.replace(/([a-zA-Z_]\w*)/g, (match) => {
+        if (this.variables[match] !== undefined) {
+          return this.variables[match]
+        }
+        return match
+      })
+      // Only allow safe characters (numbers, operators, spaces, dots)
+      if (/^[0-9+\-*/%().\s]+$/.test(expr)) {
+        // eslint-disable-next-line no-eval
+        return eval(expr)
+      }
+    } catch {}
     return value
   }
 
@@ -367,6 +438,20 @@ export class FlowInterpreter {
         return rightVal !== 0 ? leftVal % rightVal : 0
       default:
         return 0
+    }
+  }
+
+  private evaluateLogic(left: any, operator: string, right: any): boolean {
+    const leftVal = this.parseValue(left)
+    const rightVal = this.parseValue(right)
+
+    switch (operator) {
+      case "&&":
+        return leftVal && rightVal
+      case "||":
+        return leftVal || rightVal
+      default:
+        return false
     }
   }
 
@@ -447,84 +532,225 @@ export class FlowInterpreter {
     let code = "// Generated JavaScript Code\n\n"
     code += "function executeFlow() {\n"
 
-    // Declare variables
-    const variableNodes = this.nodes.filter((n) => n.type === "variable")
-    variableNodes.forEach((node) => {
-      const value = isNaN(Number(node.data.variableValue)) ? `"${node.data.variableValue}"` : node.data.variableValue
-      code += `  let ${node.data.variableName} = ${value};\n`
+    // Declare variables (from declareVariable blocks)
+    const declareNodes = this.nodes.filter((n) => n.type === "declareVariable")
+    declareNodes.forEach((node) => {
+      const value = node.data.variableValue !== undefined ? node.data.variableValue : node.data.initialValue
+      let jsValue
+      if (node.data.variableType === "string") {
+        jsValue = typeof value === "string" ? `\"${value.replace(/\\/g, "\\\\").replace(/\"/g, '\\"')}\"` : `\"\"`
+      } else if (node.data.variableType === "boolean") {
+        jsValue = value === true || value === "true" ? "true" : "false"
+      } else if (node.data.variableType === "number") {
+        jsValue = isNaN(Number(value)) ? "0" : value
+      } else if (node.data.variableType === "array") {
+        // If value is a string, try to parse as array, else output as []
+        if (Array.isArray(value)) {
+          jsValue = JSON.stringify(value)
+        } else if (typeof value === "string") {
+          try {
+            const arr = JSON.parse(value)
+            jsValue = Array.isArray(arr) ? JSON.stringify(arr) : "[]"
+          } catch {
+            jsValue = "[]"
+          }
+        } else {
+          jsValue = "[]"
+        }
+      } else if (node.data.variableType === "object") {
+        // If value is an object, output as JS object literal
+        if (typeof value === "object" && value !== null) {
+          jsValue = JSON.stringify(value)
+        } else if (typeof value === "string") {
+          try {
+            const obj = JSON.parse(value)
+            jsValue = typeof obj === "object" && obj !== null ? JSON.stringify(obj) : "{}"
+          } catch {
+            jsValue = "{}"
+          }
+        } else {
+          jsValue = "{}"
+        }
+      } else {
+        jsValue = value
+      }
+      code += `  let ${node.data.variableName} = ${jsValue};\n`
     })
-
-    if (variableNodes.length > 0) code += "\n"
+    if (declareNodes.length > 0) code += "\n"
 
     const startNode = this.nodes.find((n) => n.type === "start")
     if (startNode) {
-      code += this.generateJSNodeCode(startNode.id, 1)
+      code += this.generateJSNodeCodeFull(startNode.id, 1, new Set())
     }
 
     code += "}\n\n"
     code += "// Call the function\nexecuteFlow();"
-
     return code
   }
 
-  private generateJSNodeCode(nodeId: string, depth: number): string {
+  // Enhanced code generation for all supported block types
+  private generateJSNodeCodeFull(nodeId: string, depth: number, visited: Set<string>): string {
+    if (visited.has(nodeId)) return "" // Prevent infinite loops
+    visited.add(nodeId)
     const node = this.nodes.find((n) => n.id === nodeId)
     if (!node) return ""
-
     const indent = "  ".repeat(depth)
     let result = ""
-
     switch (node.type) {
       case "start":
-        result += `${indent}console.log("🚀 Program started");\n`
+        result += `${indent}console.log(\"🚀 Program started\");\n`
         break
       case "end":
-        result += `${indent}console.log("🏁 Program ended");\n`
+        result += `${indent}console.log(\"🏁 Program ended\");\n`
         return result
-      case "setVariable":
-        const setValue = isNaN(Number(node.data.variableValue))
-          ? `"${node.data.variableValue}"`
-          : node.data.variableValue
-        result += `${indent}${node.data.variableName} = ${setValue};\n`
+      case "declareVariable":
+        // Already declared at top, skip
         break
-      case "if":
-        result += `${indent}if (${node.data.condition}) {\n`
+      case "assignment": {
+        let value = node.data.value
+        if (node.data.valueType === "string") {
+          value = `\"${node.data.value}\"`
+        } else if (node.data.valueType === "boolean") {
+          value = node.data.value === true || node.data.value === "true" ? "true" : "false"
+        }
+        result += `${indent}${node.data.variableName} = ${value};\n`
+        break
+      }
+      case "conditional": {
+        const left = node.data.left
+        const right = node.data.right
+        const op = node.data.operator
+        result += `${indent}if (${left} ${op} ${right}) {\n`
         const trueEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "true")
         if (trueEdge) {
-          result += this.generateJSNodeCode(trueEdge.target, depth + 1)
+          result += this.generateJSNodeCodeFull(trueEdge.target, depth + 1, new Set(visited))
+        }
+        result += `${indent}}`
+        const falseEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "false")
+        if (falseEdge) {
+          result += ` else {\n`
+          result += this.generateJSNodeCodeFull(falseEdge.target, depth + 1, new Set(visited))
+          result += `${indent}}\n`
+        } else {
+          result += `\n`
+        }
+        break
+      }
+      case "forLoop": {
+        // for (let i = 0; i < n; i++)
+        const init = node.data.init || "let i = 0"
+        const condition = node.data.condition || "i < 10"
+        const increment = node.data.increment || "i++"
+        result += `${indent}for (${init}; ${condition}; ${increment}) {\n`
+        const loopEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "loop")
+        if (loopEdge) {
+          result += this.generateJSNodeCodeFull(loopEdge.target, depth + 1, new Set(visited))
         }
         result += `${indent}}\n`
         break
-      case "while":
+      }
+      case "whileLoop": {
+        const condition = node.data.condition || "true"
         result += `${indent}let whileCount = 0;\n`
-        result += `${indent}while (${node.data.condition} && whileCount < 100) {\n`
-        const whileLoopEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "loop")
-        if (whileLoopEdge) {
-          result += this.generateJSNodeCode(whileLoopEdge.target, depth + 1)
+        result += `${indent}while (${condition} && whileCount < 100) {\n`
+        const loopEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "loop")
+        if (loopEdge) {
+          result += this.generateJSNodeCodeFull(loopEdge.target, depth + 1, new Set(visited))
         }
         result += `${indent}  whileCount++;\n`
         result += `${indent}}\n`
         break
-      case "action":
-        if (node.data.actionType === "print") {
-          const printValue = isNaN(Number(node.data.actionValue)) ? `"${node.data.actionValue}"` : node.data.actionValue
-          result += `${indent}console.log(${printValue});\n`
-        } else if (node.data.actionType === "alert") {
-          result += `${indent}alert("${node.data.actionValue}");\n`
-        } else {
-          result += `${indent}// ${node.data.actionType}: ${node.data.actionValue}\n`
+      }
+      case "doWhileLoop": {
+        const condition = node.data.condition || "true"
+        result += `${indent}let doWhileCount = 0;\n`
+        result += `${indent}do {\n`
+        const loopEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "loop")
+        if (loopEdge) {
+          result += this.generateJSNodeCodeFull(loopEdge.target, depth + 1, new Set(visited))
         }
+        result += `${indent}  doWhileCount++;\n`
+        result += `${indent}} while (${condition} && doWhileCount < 100);\n`
         break
+      }
+      case "print": {
+        let value = node.data.value
+        if (typeof value === "string" && !/^\w+$/.test(value)) {
+          value = `\"${value}\"`
+        }
+        result += `${indent}console.log(${value});\n`
+        break
+      }
+      case "input": {
+        // Simulate input as prompt (or placeholder)
+        result += `${indent}// Input for ${node.data.variableName} (user input not supported in codegen)\n`
+        break
+      }
+      case "arithmeticOperator": {
+        const left = node.data.left
+        const op = node.data.operator
+        const right = node.data.right
+        result += `${indent}const ${node.data.resultVar || "result"} = ${left} ${op} ${right};\n`
+        break
+      }
+      case "comparisonOperator": {
+        const left = node.data.left
+        const op = node.data.operator
+        const right = node.data.right
+        result += `${indent}const ${node.data.resultVar || "result"} = ${left} ${op} ${right};\n`
+        break
+      }
+      case "logicalOperator": {
+        const left = node.data.left
+        const op = node.data.operator
+        const right = node.data.right
+        result += `${indent}const ${node.data.resultVar || "result"} = ${left} ${op} ${right};\n`
+        break
+      }
+      case "arrayPush": {
+        result += `${indent}${node.data.array}.push(${node.data.value});\n`
+        break
+      }
+      case "arrayPop": {
+        result += `${indent}${node.data.array}.pop();\n`
+        break
+      }
+      case "functionDeclaration": {
+        result += `${indent}function ${node.data.functionName}(${(node.data.parameters || []).join(", ")}) {\n`
+        const bodyEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "body")
+        if (bodyEdge) {
+          result += this.generateJSNodeCodeFull(bodyEdge.target, depth + 1, new Set(visited))
+        }
+        result += `${indent}}\n`
+        break
+      }
+      case "functionCall": {
+        result += `${indent}${node.data.functionName}(${(node.data.arguments || []).join(", ")});\n`
+        break
+      }
+      case "return": {
+        result += `${indent}return;\n`
+        break
+      }
+      case "break": {
+        result += `${indent}break;\n`
+        break
+      }
+      case "continue": {
+        result += `${indent}continue;\n`
+        break
+      }
+      // Add more block types as needed
+      default:
+        result += `${indent}// Unknown or unhandled node type: ${node.type}\n`
     }
-
-    // Continue to next node (except for control flow nodes)
-    if (!["if", "while"].includes(node.type)) {
+    // Continue to next node (except for control flow nodes that branch)
+    if (!["conditional", "forLoop", "whileLoop", "doWhileLoop", "functionDeclaration"].includes(node.type)) {
       const nextEdge = this.edges.find((e) => e.source === nodeId && e.sourceHandle === "out")
       if (nextEdge) {
-        result += this.generateJSNodeCode(nextEdge.target, depth)
+        result += this.generateJSNodeCodeFull(nextEdge.target, depth, new Set(visited))
       }
     }
-
     return result
   }
 
